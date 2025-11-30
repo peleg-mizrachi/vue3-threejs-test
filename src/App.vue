@@ -5,7 +5,7 @@
     </header>
 
     <main class="app-main">
-      <section class="map-wrapper">
+      <!-- <section class="map-wrapper">
         <LeafletMap :planes="planes" @right-click-origin="onRightClickOrigin" />
       </section>
 
@@ -25,9 +25,15 @@
           <p>Right-click somewhere on the map to set the 3D origin.</p>
         </div>
 
-        <!-- Three.js window -->
         <div class="three-wrapper">
           <ThreeProfileView :origin="profileOrigin" :planes="planes" />
+        </div>
+      </section> -->
+
+      <section class="test-window">
+        <h2>3D Profile View</h2>
+        <div class="three-wrapper">
+          <ThreeProfileView2 :origin="profileOrigin" :planes="planes" />
         </div>
       </section>
     </main>
@@ -38,6 +44,7 @@
 import { ref, onMounted, onBeforeUnmount } from "vue";
 import LeafletMap from "./components/LeafletMap.vue";
 import ThreeProfileView from "./components/ThreeProfileView.vue";
+import ThreeProfileView2 from "./components/ThreeProfileView2.vue";
 
 // Tel Aviv-ish mock planes with heading (deg) and speed (m/s)
 const planes = ref([
@@ -143,8 +150,8 @@ onBeforeUnmount(() => {
 /* right: 3D panel */
 .side-panel {
   flex: 1;
-  min-width: 280px;
-  max-width: 420px;
+  /* min-width: 280px;
+  max-width: 420px; */
   border-left: 1px solid #444;
   background: #050812;
   color: #eee;
@@ -164,5 +171,10 @@ onBeforeUnmount(() => {
   border-radius: 8px;
   overflow: hidden;
   border: 1px solid #333;
+}
+
+.test-window {
+  height: 100%;
+  width: 100%;
 }
 </style>
