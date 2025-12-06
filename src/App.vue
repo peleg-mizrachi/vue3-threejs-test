@@ -33,7 +33,8 @@
       <section class="test-window">
         <h2>3D Profile View</h2>
         <div class="three-wrapper">
-          <ThreeProfileView2 :origin="profileOrigin" :planes="planes" />
+          <!-- <ThreeProfileView2 :origin="profileOrigin" :planes="planes" /> -->
+          <ThreeProfileView3 :origin="profileOrigin" :planes="planes" />
         </div>
       </section>
     </main>
@@ -45,6 +46,7 @@ import { ref, onMounted, onBeforeUnmount } from "vue";
 import LeafletMap from "./components/LeafletMap.vue";
 import ThreeProfileView from "./components/ThreeProfileView.vue";
 import ThreeProfileView2 from "./components/ThreeProfileView2.vue";
+import ThreeProfileView3 from "./components/ThreeProfileView3.vue";
 
 // Tel Aviv-ish mock planes with heading (deg) and speed (m/s)
 const planes = ref([

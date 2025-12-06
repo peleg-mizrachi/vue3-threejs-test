@@ -256,7 +256,6 @@ function initScene() {
   renderer.setSize(width, height);
   renderer.setPixelRatio(window.devicePixelRatio || 1);
   renderer.setClearColor(0x02030a, 1);
-
   renderer.localClippingEnabled = true;
 
   // Scene
@@ -276,7 +275,7 @@ function initScene() {
   controls.target.set(0, 4000, 0);
   controls.enablePan = true;
   controls.minDistance = 8000;
-  controls.maxDistance = 400000; // can zoom out well beyond coverage
+  controls.maxDistance = 500000; // can zoom out well beyond coverage
   // Prevent going under the floor: always above "horizon"
   controls.minPolarAngle = 0.2; // not perfectly top-down
   controls.maxPolarAngle = Math.PI / 2 - 0.05; // never below horizon
@@ -310,8 +309,8 @@ function initScene() {
   const grid = new THREE.GridHelper(
     gridSize,
     gridDivisions,
-    0x00ffff,
-    0xc4c4c5
+    0x00ffff, // center liens
+    0xc4c4c5 // regular lines
   );
   grid.position.y = 1;
   grid.position.set(-150000, 1, 0); // same X offset, y=1 to avoid z-fighting
