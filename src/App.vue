@@ -169,7 +169,7 @@ onBeforeUnmount(() => {
 
 .three-wrapper {
   margin-top: 0.5rem;
-  flex: 1;
+  flex: 1 1 auto;
   border-radius: 8px;
   overflow: hidden;
   border: 1px solid #333;
@@ -178,5 +178,7 @@ onBeforeUnmount(() => {
 .test-window {
   height: 100%;
   width: 100%;
+  display: flex;
+  flex-direction: column;
 }
 </style>

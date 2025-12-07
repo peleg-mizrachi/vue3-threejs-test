@@ -8,6 +8,7 @@
 import { onMounted, onBeforeUnmount, ref, watch } from "vue";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { ViewportGizmo } from "three-viewport-gizmo";
 
 // ---------------------------------------------------------------------
 // Props
@@ -47,11 +48,7 @@ const planeGroups = new Map(); // id -> THREE.Group
 let coverageCone = null;
 let coverageWire = null;
 
-// === GIZMO STATE ===
-let gizmoScene = null;
-let gizmoCamera = null;
-let gizmoAxesHelper = null;
-let gizmoRoot = null;
+let gizmo = null;
 
 // ---------------------------------------------------------------------
 // Coordinate + plane helpers
@@ -414,25 +411,6 @@ function updateRangeLabelScales() {
   }
 }
 
-function createGizmoLabel(text, x, y, z) {
-  const sprite = createTextSprite(text, { fontSize: 64, padding: 8 });
-  sprite.position.set(x, y, z);
-
-  const aspect = sprite.userData.aspect || 2;
-
-  // 🔹 BIG size in gizmo units
-  const height = 1.8; // try 1.8–2.2
-  const width = height * aspect;
-  sprite.scale.set(width, height, 1);
-
-  if (sprite.material) {
-    sprite.material.depthTest = false;
-    sprite.material.depthWrite = false;
-  }
-
-  return sprite;
-}
-
 // ---------------------------------------------------------------------
 // Coverage cone orientation (azimuth + elevation)
 // ---------------------------------------------------------------------
@@ -497,6 +475,23 @@ function initScene() {
   controls.maxPolarAngle = Math.PI / 2 - 0.05;
   controls.enableDamping = true;
   controls.dampingFactor = 0.5;
+
+  // === Viewport gizmo (top-left) ===
+  gizmo = new ViewportGizmo(camera, renderer, {
+    type: "sphere", // or "sphere" / "rounded-cube"
+    size: 140, // pixels – make it bigger if you want
+    placement: "bottom-left", // pin to top-left
+    offset: {
+      left: 25,
+      top: 25,
+    },
+    // map axes to your semantics: X = East, Y = Up, Z = North
+    x: { label: "E", color: 0xff5555, labelColor: "#ffffff", scale: 0.8 },
+    y: { label: "UP", color: 0x55ff55, labelColor: "#ffffff", scale: 0.8 },
+    z: { label: "N", color: 0x5555ff, labelColor: "#ffffff", scale: 0.8 },
+  });
+
+  gizmo.attachControls(controls);
 
   // Lights
   const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
@@ -612,82 +607,21 @@ function initScene() {
     props.coverageElevationDeg
   );
 
-  // === GIZMO INIT (mini axes top-left) ===
-  gizmoScene = new THREE.Scene();
-  // wider far plane + camera a bit further back
-  gizmoCamera = new THREE.PerspectiveCamera(40, 1, 0.1, 100);
-  gizmoCamera.position.set(0, 0, 8);
-  gizmoCamera.lookAt(0, 0, 0);
-
-  // Root that we will rotate
-  gizmoRoot = new THREE.Group();
-  // 🔹 no extra scale here – keep units small & controlled
-  // gizmoRoot.scale.set(2.0, 2.0, 2.0);
-  gizmoScene.add(gizmoRoot);
-
-  // smaller axes helper, fits comfortably in view
-  gizmoAxesHelper = new THREE.AxesHelper(2.5); // X red, Y green, Z blue
-  gizmoRoot.add(gizmoAxesHelper);
-
-  // optional text labels: E (X+), N (Z+), UP (Y+)
-  const gizmoLabels = new THREE.Group();
-
-  gizmoLabels.add(createGizmoLabel("E", 2.8, 0, 0)); // +X (east)
-  gizmoLabels.add(createGizmoLabel("N", 0, 0, 2.8)); // +Z (north)
-  gizmoLabels.add(createGizmoLabel("UP", 0, 2.8, 0)); // +Y (up)
-
-  gizmoRoot.add(gizmoLabels);
-
   window.addEventListener("resize", onWindowResize);
 
-  //   const tick = () => {
-  //     if (!renderer || !scene || !camera) return;
-
-  //     controls && controls.update();
-  //     updateRangeLabelScales();
-  //     renderer.render(scene, camera);
-
-  //     animationId = requestAnimationFrame(tick);
-  //   };
   const tick = () => {
     if (!renderer || !scene || !camera) return;
 
     controls && controls.update();
     updateRangeLabelScales();
 
-    // main scene render
-    const size = new THREE.Vector2();
-    renderer.getSize(size);
-    const width = size.x;
-    const height = size.y;
-
     renderer.setScissorTest(false);
-    renderer.setViewport(0, 0, width, height);
+    // main scene render
     renderer.render(scene, camera);
 
-    // gizmo render in top-left corner
-    if (gizmoScene && gizmoCamera) {
-      const insetSize = Math.min(width, height) * 0.24;
-      const margin = 16;
-      const insetX = margin;
-      const insetY = height - insetSize - margin;
-
-      renderer.clearDepth(); // draw on top of main scene
-      renderer.setScissorTest(true);
-      renderer.setScissor(insetX, insetY, insetSize, insetSize);
-      renderer.setViewport(insetX, insetY, insetSize, insetSize);
-
-      // keep camera fixed looking at origin
-      gizmoCamera.position.set(0, 0, 8);
-      gizmoCamera.lookAt(0, 0, 0);
-
-      // rotate axes to match main camera orientation
-      if (gizmoRoot) {
-        gizmoRoot.quaternion.copy(camera.quaternion);
-      }
-
-      renderer.render(gizmoScene, gizmoCamera);
-      renderer.setScissorTest(false);
+    // gizmo overlay
+    if (gizmo) {
+      gizmo.render();
     }
 
     animationId = requestAnimationFrame(tick);
@@ -707,6 +641,10 @@ function onWindowResize() {
   renderer.setSize(width, height);
   camera.aspect = width / height;
   camera.updateProjectionMatrix();
+
+  if (gizmo) {
+    gizmo.update(); // makes it recompute its position/size
+  }
 }
 
 onMounted(() => {
@@ -742,6 +680,11 @@ onBeforeUnmount(() => {
   }
   planeGroups.clear();
 
+  if (gizmo) {
+    gizmo.dispose();
+    gizmo = null;
+  }
+
   if (renderer) {
     renderer.dispose();
     renderer = null;
@@ -750,9 +693,6 @@ onBeforeUnmount(() => {
   scene = null;
   camera = null;
   controls = null;
-  gizmoScene = null;
-  gizmoCamera = null;
-  gizmoAxesHelper = null;
 });
 </script>
 
