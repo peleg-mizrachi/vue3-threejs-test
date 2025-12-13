@@ -16,6 +16,7 @@ import { useAltitudeAxis } from "@/composables/useAltitudeAxis.js";
 import { useGizmo } from "@/composables/useGizmo.js";
 import { useLabels } from "@/composables/useLabels.js";
 import { useFixedView } from "@/composables/useFixedView.js";
+import { usePlanes } from "@/composables/useAirplanes.js";
 
 // ---------------------------------------------------------------------
 // Props
@@ -48,7 +49,7 @@ let camera = null;
 let controls = null;
 let animationId = null;
 
-const planeGroups = new Map(); // id -> THREE.Group
+// const planeGroups = new Map(); // id -> THREE.Group
 
 let originSphere = null;
 
@@ -56,262 +57,19 @@ const COVERAGE_HEIGHT = 300000;
 const groundClipPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 let coverageDir = null;
 let coverageApi = null;
-
 let groundApi = null;
 let rangeRingsApi = null;
 let altitudeAxisApi = null;
 let gizmoApi = null;
 let labelsApi = null;
 let fixedViewApi = null;
+let planesApi = null;
 
 // ---------------------------------------------------------------------
 // Coordinate + plane helpers
 // ---------------------------------------------------------------------
 
-const R = 6371000; // Earth radius (approx)
-const deg2rad = Math.PI / 180;
 const ALT_SCALE = 10;
-
-function latLonAltToLocalENU(lat, lon, alt, origin) {
-  const phi0 = origin.lat * deg2rad;
-  const lam0 = origin.lng * deg2rad;
-
-  const phi = lat * deg2rad;
-  const lam = lon * deg2rad;
-
-  const dPhi = phi - phi0;
-  const dLam = lam - lam0;
-
-  const xEast = R * dLam * Math.cos(phi0); // meters east
-  const zNorth = R * dPhi; // meters north
-  const yUp = (alt ?? 0) * ALT_SCALE;
-
-  // Map to Three.js: X=east, Y=up, Z=north
-  return new THREE.Vector3(xEast, yUp, zNorth);
-}
-
-function createPlaneGroup(planeId) {
-  const group = new THREE.Group();
-
-  // ---------------------------
-  // BODY (plane mesh + label)
-  // ---------------------------
-  const bodyGroup = new THREE.Group();
-
-  const bodyGeom = new THREE.BoxGeometry(5000, 5000, 5000);
-  const bodyMat = new THREE.MeshStandardMaterial({
-    color: 0xffaa00,
-    metalness: 0.2,
-    roughness: 0.5,
-  });
-  const mesh = new THREE.Mesh(bodyGeom, bodyMat);
-
-  // Shift so rotation feels like nose-first (as before)
-  mesh.geometry.translate(0, 0, -400);
-
-  bodyGroup.add(mesh);
-
-  // Label above plane
-  const label = labelsApi.createTextSprite(String(planeId), {
-    fontSize: 48,
-    padding: 8,
-  });
-  label.position.set(0, 800, 0);
-  bodyGroup.add(label);
-
-  labelsApi.registerLabelSprite(label, { sizeMultiplier: 0.8 });
-  group.add(bodyGroup);
-
-  // ---------------------------
-  // ALTITUDE COLUMN
-  // ---------------------------
-
-  // Thin vertical stem from plane to ground (unit height, we scale later)
-  const stemRadius = 300;
-  const stemGeom = new THREE.CylinderGeometry(stemRadius, stemRadius, 1, 12);
-  const stemMat = new THREE.MeshBasicMaterial({
-    color: 0x66aaff,
-    transparent: true,
-    opacity: 0.4,
-    depthWrite: false,
-  });
-
-  const columnGroup = new THREE.Group();
-  const stem = new THREE.Mesh(stemGeom, stemMat);
-  columnGroup.add(stem);
-  group.add(columnGroup);
-
-  // Ground ring (on y=0 world, we position it in syncPlanes)
-  const groundRingInner = 1200;
-  const groundRingOuter = 2200;
-  const groundRingGeom = new THREE.RingGeometry(
-    groundRingInner,
-    groundRingOuter,
-    32
-  );
-  const groundRingMat = new THREE.MeshBasicMaterial({
-    color: 0x66aaff,
-    transparent: true,
-    opacity: 0.35,
-    side: THREE.DoubleSide,
-    depthWrite: false,
-  });
-  const groundRing = new THREE.Mesh(groundRingGeom, groundRingMat);
-  groundRing.rotation.x = -Math.PI / 2; // face up
-  group.add(groundRing);
-
-  // Bowl-like base just under the plane (optional but nice)
-  const bowlInner = 800;
-  const bowlOuter = 1800;
-  const bowlGeom = new THREE.RingGeometry(bowlInner, bowlOuter, 32);
-  const bowlMat = new THREE.MeshBasicMaterial({
-    color: 0x66aaff,
-    transparent: true,
-    opacity: 0.5,
-    side: THREE.DoubleSide,
-    depthWrite: false,
-  });
-  const bowl = new THREE.Mesh(bowlGeom, bowlMat);
-  bowl.rotation.x = -Math.PI / 2;
-
-  // Put it just under the plane body (box is 5000 high → half is 2500)
-  bowl.position.y = -2600;
-  group.add(bowl);
-
-  // Store references for updates in syncPlanes
-  group.userData.bodyGroup = bodyGroup;
-  group.userData.altitudeColumnGroup = columnGroup;
-  group.userData.altitudeStem = stem;
-  group.userData.groundRing = groundRing;
-  group.userData.bowl = bowl;
-
-  scene.add(group);
-  return group;
-}
-
-// Sync planes with props.origin + props.planes
-function syncPlanes() {
-  if (!scene) return;
-
-  const origin = props.origin;
-  const planes = props.planes || [];
-
-  // No origin -> clear planes
-  if (!origin) {
-    for (const [, group] of planeGroups.entries()) {
-      scene.remove(group);
-    }
-    planeGroups.clear();
-    return;
-  }
-
-  const seenIds = new Set();
-  const MAX_RADIUS = 300_000; // 300 km horizontal radius
-
-  for (const plane of planes) {
-    if (plane.lat == null || plane.lng == null) continue;
-
-    const altMeters = plane.alt ?? 0;
-    const pos = latLonAltToLocalENU(plane.lat, plane.lng, altMeters, origin);
-
-    // Limit to a certain radius in the horizontal plane
-    const radius2D = Math.hypot(pos.x, pos.z); // X=east, Z=north
-    if (radius2D > MAX_RADIUS) continue;
-
-    let group = planeGroups.get(plane.id);
-    if (!group) {
-      group = createPlaneGroup(plane.id);
-      planeGroups.set(plane.id, group);
-    }
-
-    // Position in ENU
-    group.position.copy(pos);
-
-    // Heading: 0° = north, clockwise; our Z=north, X=east
-    if (plane.heading != null) {
-      const yawRad = THREE.MathUtils.degToRad(-plane.heading);
-      group.rotation.set(0, yawRad, 0);
-    }
-
-    // ---- ALTITUDE COLUMN UPDATE ----
-    const stem = group.userData.altitudeStem;
-    const columnGroup = group.userData.altitudeColumnGroup;
-    const groundRing = group.userData.groundRing;
-
-    if (stem && columnGroup && groundRing) {
-      const altitudeY = pos.y; // already alt * ALT_SCALE
-
-      // if altitude is <= 0, hide the column
-      if (altitudeY <= 0) {
-        stem.visible = false;
-        groundRing.visible = false;
-      } else {
-        stem.visible = true;
-        groundRing.visible = true;
-
-        // Column:
-        // - we want top at plane altitude
-        // - bottom at ground (y=0)
-        //
-        // columnGroup is anchored at plane group origin (the plane),
-        // so:
-        //   - move the group halfway down,
-        //   - scale the unit-height stem to full altitude.
-        columnGroup.position.set(0, -altitudeY / 2, 0);
-        stem.scale.set(1, altitudeY, 1); // geom height=1 → total height=altitudeY
-
-        // Ground ring: same x/z as plane, y=0 in world
-        groundRing.position.set(0, -altitudeY, 0);
-      }
-    }
-
-    seenIds.add(plane.id);
-    // console.log("planes ENU", plane.id, pos);
-  }
-
-  // Remove planes that disappeared
-  for (const [id, group] of planeGroups.entries()) {
-    if (!seenIds.has(id)) {
-      scene.remove(group);
-      planeGroups.delete(id);
-    }
-  }
-
-  // console.log("origin", origin);
-}
-
-// ---------------------------------------------------------------------
-// Environment helpers (rings, axis, compass, labels)
-// ---------------------------------------------------------------------
-
-// function createCompassLabels(radius, createTextSprite) {
-//   const group = new THREE.Group();
-//   const offsetY = 200;
-
-//   const directions = [
-//     { label: "N", pos: new THREE.Vector3(0, offsetY, radius) },
-//     { label: "E", pos: new THREE.Vector3(radius, offsetY, 0) },
-//     { label: "S", pos: new THREE.Vector3(0, offsetY, -radius) },
-//     { label: "W", pos: new THREE.Vector3(-radius, offsetY, 0) },
-//   ];
-
-//   for (const dir of directions) {
-//     const sprite = createTextSprite(dir.label, {
-//       fontSize: 64,
-//       padding: 10,
-//     });
-//     sprite.position.copy(dir.pos);
-//     group.add(sprite);
-
-//     labelsApi.registerLabelSprite(sprite, { sizeMultiplier: 1.0 });
-//   }
-
-//   return group;
-// }
-
-// ---------------------------------------------------------------------
-// Init + lifecycle
-// ---------------------------------------------------------------------
 
 function initScene() {
   const canvas = canvasEl.value;
@@ -452,6 +210,22 @@ function initScene() {
     // backDistance: 5_000,
   });
 
+  const fixedPointPosition = new THREE.Vector3(
+    0,
+    4000 * ALT_SCALE, // or whatever your fixed-point altitude is
+    0
+  );
+
+  planesApi = usePlanes({
+    scene,
+    camera,
+    domElement: renderer.domElement,
+    labelsApi,
+    fixedPointPosition,
+    altScale: ALT_SCALE,
+    maxRadius: 300_000,
+  });
+
   window.addEventListener("resize", onWindowResize);
 
   const tick = () => {
@@ -496,13 +270,22 @@ function onWindowResize() {
 
 onMounted(() => {
   initScene();
-  syncPlanes();
+  if (planesApi) {
+    planesApi.syncPlanes({
+      origin: props.origin,
+      planes: props.planes,
+    });
+  }
 });
 
 watch(
   () => [props.origin, props.planes],
   () => {
-    syncPlanes();
+    if (!planesApi) return;
+    planesApi.syncPlanes({
+      origin: props.origin,
+      planes: props.planes,
+    });
   },
   { deep: true }
 );
@@ -526,10 +309,10 @@ onBeforeUnmount(() => {
   }
   window.removeEventListener("resize", onWindowResize);
 
-  for (const [, group] of planeGroups.entries()) {
-    scene && scene.remove(group);
+  if (planesApi) {
+    planesApi.disposePlanes();
+    planesApi = null;
   }
-  planeGroups.clear();
 
   if (groundApi) {
     groundApi.disposeGround();

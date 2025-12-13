@@ -69,47 +69,6 @@ function onRightClickOrigin(latlng) {
 }
 
 onMounted(() => {
-  // const dtSeconds = 0.2; // time step per tick
-  // const intervalMs = dtSeconds * 1000;
-  // moveTimer = setInterval(() => {
-  //   planes.value = planes.value.map((p) => {
-  //     const speed = p.speed ?? 200; // m/s
-  //     const headingDeg = p.heading ?? 0;
-  //     const distance = speed * dtSeconds; // meters travelled in this step
-  //     const headingRad = (Math.PI / 180) * headingDeg;
-  //     // Simple ENU: dx = east, dz = north
-  //     const dx = Math.sin(headingRad) * distance;
-  //     const dz = Math.cos(headingRad) * distance;
-  //     // Convert meters to degrees (approx)
-  //     const latRad = (p.lat * Math.PI) / 180;
-  //     const metersPerDegLat = 111_111;
-  //     const metersPerDegLng = metersPerDegLat * Math.cos(latRad) || 1e-6;
-  //     const dLat = dz / metersPerDegLat;
-  //     const dLng = dx / metersPerDegLng;
-  //     let newLat = p.lat + dLat;
-  //     let newLng = p.lng + dLng;
-  //     let newHeading = headingDeg;
-  //     // Keep them roughly around TLV area – if they wander too far, flip heading
-  //     const latCenter = 32.0853;
-  //     const lngCenter = 34.7818;
-  //     const maxDeltaDeg = 0.5; // ~50–60km
-  //     if (
-  //       Math.abs(newLat - latCenter) > maxDeltaDeg ||
-  //       Math.abs(newLng - lngCenter) > maxDeltaDeg
-  //     ) {
-  //       // turn around, but don't move this tick
-  //       newLat = p.lat;
-  //       newLng = p.lng;
-  //       newHeading = (headingDeg + 180) % 360;
-  //     }
-  //     return {
-  //       ...p,
-  //       lat: newLat,
-  //       lng: newLng,
-  //       heading: newHeading,
-  //     };
-  //   });
-  // }, intervalMs);
   const dtSeconds = 0.2;
   const intervalMs = dtSeconds * 1000;
 
