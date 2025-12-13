@@ -25,7 +25,7 @@ const props = defineProps({
   // optional future props for cone orientation (deg)
   coverageAzimuthDeg: {
     type: Number,
-    default: 90, // 90° = East (in our system)
+    default: 0, // 90° = East (in our system)
   },
   coverageElevationDeg: {
     type: Number,
@@ -41,8 +41,56 @@ let camera = null;
 let controls = null;
 let animationId = null;
 
-const rangeLabelSprites = [];
+const labelSprites = []; // all world-space text labels (range rings, altitude, etc.)
+const rangeRingLabels = []; // { sprite, radiusMeters, side: "front" | "back", labelHeight: number }
+
+function registerLabelSprite(sprite, { sizeMultiplier = 1 } = {}) {
+  sprite.userData.labelSizeMultiplier = sizeMultiplier; // e.g. 1 for range, 0.8 for altitude
+  labelSprites.push(sprite);
+}
 const planeGroups = new Map(); // id -> THREE.Group
+
+let originSphere = null;
+
+// "sensor view" state
+let isFixedPointView = false;
+
+const savedView = {
+  position: new THREE.Vector3(),
+  target: new THREE.Vector3(),
+  controls: {
+    enableRotate: true,
+    enablePan: true,
+    enableZoom: true,
+    minDistance: 8000,
+    maxDistance: 500000,
+  },
+};
+
+const GROUND_SIZE = 400000; // 400 km square
+const GROUND_HALF = GROUND_SIZE / 2;
+const BACK_MARGIN = 50_000; // 50 km "behind" the origin
+
+let ground = null;
+let grid = null;
+
+// These 4 planes define the "inside" of the ground square
+const ringClipPlanes = [
+  new THREE.Plane(new THREE.Vector3(1, 0, 0), 0), // x >= minX
+  new THREE.Plane(new THREE.Vector3(-1, 0, 0), 0), // x <= maxX
+  new THREE.Plane(new THREE.Vector3(0, 0, 1), 0), // z >= minZ
+  new THREE.Plane(new THREE.Vector3(0, 0, -1), 0), // z <= maxZ
+];
+
+// direction of coverage cone axis in world space
+const coverageDir = new THREE.Vector3(1, 0, 0);
+
+// shared raycasting helpers
+const raycaster = new THREE.Raycaster();
+const pointerNDC = new THREE.Vector2();
+
+// reuse same height used for coverage
+const COVERAGE_HEIGHT = 300000;
 
 // We'll keep a reference to the cone & wire so we can reorient later
 let coverageCone = null;
@@ -56,6 +104,7 @@ let gizmo = null;
 
 const R = 6371000; // Earth radius (approx)
 const deg2rad = Math.PI / 180;
+const ALT_SCALE = 10;
 
 function latLonAltToLocalENU(lat, lon, alt, origin) {
   const phi0 = origin.lat * deg2rad;
@@ -69,7 +118,7 @@ function latLonAltToLocalENU(lat, lon, alt, origin) {
 
   const xEast = R * dLam * Math.cos(phi0); // meters east
   const zNorth = R * dPhi; // meters north
-  const yUp = alt; // meters up (relative)
+  const yUp = (alt ?? 0) * ALT_SCALE;
 
   // Map to Three.js: X=east, Y=up, Z=north
   return new THREE.Vector3(xEast, yUp, zNorth);
@@ -137,11 +186,44 @@ function createTextSprite(text, { fontSize = 48, padding = 8 } = {}) {
   return sprite;
 }
 
-// Plane mesh + label group
+// // Plane mesh + label group
+// function createPlaneGroup(planeId) {
+//   const group = new THREE.Group();
+
+//   const bodyGeom = new THREE.BoxGeometry(5000, 5000, 5000);
+//   const bodyMat = new THREE.MeshStandardMaterial({
+//     color: 0xffaa00,
+//     metalness: 0.2,
+//     roughness: 0.5,
+//   });
+//   const mesh = new THREE.Mesh(bodyGeom, bodyMat);
+
+//   // Shift so rotation feels like nose-first
+//   mesh.geometry.translate(0, 0, -400);
+
+//   group.add(mesh);
+
+//   // Label above plane
+//   const label = createTextSprite(String(planeId), {
+//     fontSize: 48,
+//     padding: 8,
+//   });
+//   label.position.set(0, 800, 0);
+//   group.add(label);
+
+//   scene.add(group);
+//   return group;
+// }
+
 function createPlaneGroup(planeId) {
   const group = new THREE.Group();
 
-  const bodyGeom = new THREE.BoxGeometry(600, 200, 1000);
+  // ---------------------------
+  // BODY (plane mesh + label)
+  // ---------------------------
+  const bodyGroup = new THREE.Group();
+
+  const bodyGeom = new THREE.BoxGeometry(5000, 5000, 5000);
   const bodyMat = new THREE.MeshStandardMaterial({
     color: 0xffaa00,
     metalness: 0.2,
@@ -149,10 +231,10 @@ function createPlaneGroup(planeId) {
   });
   const mesh = new THREE.Mesh(bodyGeom, bodyMat);
 
-  // Shift so rotation feels like nose-first
+  // Shift so rotation feels like nose-first (as before)
   mesh.geometry.translate(0, 0, -400);
 
-  group.add(mesh);
+  bodyGroup.add(mesh);
 
   // Label above plane
   const label = createTextSprite(String(planeId), {
@@ -160,7 +242,72 @@ function createPlaneGroup(planeId) {
     padding: 8,
   });
   label.position.set(0, 800, 0);
-  group.add(label);
+  bodyGroup.add(label);
+
+  group.add(bodyGroup);
+
+  // ---------------------------
+  // ALTITUDE COLUMN
+  // ---------------------------
+
+  // Thin vertical stem from plane to ground (unit height, we scale later)
+  const stemRadius = 300;
+  const stemGeom = new THREE.CylinderGeometry(stemRadius, stemRadius, 1, 12);
+  const stemMat = new THREE.MeshBasicMaterial({
+    color: 0x66aaff,
+    transparent: true,
+    opacity: 0.4,
+    depthWrite: false,
+  });
+
+  const columnGroup = new THREE.Group();
+  const stem = new THREE.Mesh(stemGeom, stemMat);
+  columnGroup.add(stem);
+  group.add(columnGroup);
+
+  // Ground ring (on y=0 world, we position it in syncPlanes)
+  const groundRingInner = 1200;
+  const groundRingOuter = 2200;
+  const groundRingGeom = new THREE.RingGeometry(
+    groundRingInner,
+    groundRingOuter,
+    32
+  );
+  const groundRingMat = new THREE.MeshBasicMaterial({
+    color: 0x66aaff,
+    transparent: true,
+    opacity: 0.35,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+  });
+  const groundRing = new THREE.Mesh(groundRingGeom, groundRingMat);
+  groundRing.rotation.x = -Math.PI / 2; // face up
+  group.add(groundRing);
+
+  // Bowl-like base just under the plane (optional but nice)
+  const bowlInner = 800;
+  const bowlOuter = 1800;
+  const bowlGeom = new THREE.RingGeometry(bowlInner, bowlOuter, 32);
+  const bowlMat = new THREE.MeshBasicMaterial({
+    color: 0x66aaff,
+    transparent: true,
+    opacity: 0.5,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+  });
+  const bowl = new THREE.Mesh(bowlGeom, bowlMat);
+  bowl.rotation.x = -Math.PI / 2;
+
+  // Put it just under the plane body (box is 5000 high → half is 2500)
+  bowl.position.y = -2600;
+  group.add(bowl);
+
+  // Store references for updates in syncPlanes
+  group.userData.bodyGroup = bodyGroup;
+  group.userData.altitudeColumnGroup = columnGroup;
+  group.userData.altitudeStem = stem;
+  group.userData.groundRing = groundRing;
+  group.userData.bowl = bowl;
 
   scene.add(group);
   return group;
@@ -183,7 +330,7 @@ function syncPlanes() {
   }
 
   const seenIds = new Set();
-  const MAX_RADIUS = 150_000; // 150 km horizontal radius
+  const MAX_RADIUS = 300_000; // 300 km horizontal radius
 
   for (const plane of planes) {
     if (plane.lat == null || plane.lng == null) continue;
@@ -201,7 +348,7 @@ function syncPlanes() {
       planeGroups.set(plane.id, group);
     }
 
-    // Position
+    // Position in ENU
     group.position.copy(pos);
 
     // Heading: 0° = north, clockwise; our Z=north, X=east
@@ -210,7 +357,40 @@ function syncPlanes() {
       group.rotation.set(0, yawRad, 0);
     }
 
+    // ---- ALTITUDE COLUMN UPDATE ----
+    const stem = group.userData.altitudeStem;
+    const columnGroup = group.userData.altitudeColumnGroup;
+    const groundRing = group.userData.groundRing;
+
+    if (stem && columnGroup && groundRing) {
+      const altitudeY = pos.y; // already alt * ALT_SCALE
+
+      // if altitude is <= 0, hide the column
+      if (altitudeY <= 0) {
+        stem.visible = false;
+        groundRing.visible = false;
+      } else {
+        stem.visible = true;
+        groundRing.visible = true;
+
+        // Column:
+        // - we want top at plane altitude
+        // - bottom at ground (y=0)
+        //
+        // columnGroup is anchored at plane group origin (the plane),
+        // so:
+        //   - move the group halfway down,
+        //   - scale the unit-height stem to full altitude.
+        columnGroup.position.set(0, -altitudeY / 2, 0);
+        stem.scale.set(1, altitudeY, 1); // geom height=1 → total height=altitudeY
+
+        // Ground ring: same x/z as plane, y=0 in world
+        groundRing.position.set(0, -altitudeY, 0);
+      }
+    }
+
     seenIds.add(plane.id);
+    console.log("planes ENU", plane.id, pos);
   }
 
   // Remove planes that disappeared
@@ -220,11 +400,53 @@ function syncPlanes() {
       planeGroups.delete(id);
     }
   }
+
+  console.log("origin", origin);
 }
 
 // ---------------------------------------------------------------------
 // Environment helpers (rings, axis, compass, labels)
 // ---------------------------------------------------------------------
+
+function updateGroundAndGridPlacement() {
+  if (!ground || !grid) return;
+
+  // Project coverageDir onto horizontal plane (XZ)
+  const dirProj = new THREE.Vector3(coverageDir.x, 0, coverageDir.z);
+  if (dirProj.lengthSq() < 1e-6) {
+    // coverage pointing straight up/down -> fall back to +X
+    dirProj.set(1, 0, 0);
+  } else {
+    dirProj.normalize();
+  }
+
+  // We want ~50 km behind the origin, rest in front.
+  // With a 400 km square: half = 200 km
+  // center offset = half - BACK_MARGIN = 200 - 50 = 150 km
+  const offsetDist = GROUND_HALF - BACK_MARGIN; // 150 km
+  const offset = dirProj.multiplyScalar(offsetDist);
+
+  ground.position.set(offset.x, 0, offset.z);
+  grid.position.set(offset.x, 1, offset.z);
+
+  // 🔹 Update clipping planes so rings are only visible inside [minX,maxX] × [minZ,maxZ]
+  const minX = ground.position.x - GROUND_HALF;
+  const maxX = ground.position.x + GROUND_HALF;
+  const minZ = ground.position.z - GROUND_HALF;
+  const maxZ = ground.position.z + GROUND_HALF;
+
+  // plane 0: x >= minX
+  ringClipPlanes[0].constant = -minX; // distance = x - minX
+
+  // plane 1: x <= maxX
+  ringClipPlanes[1].constant = maxX; // distance = -x + maxX
+
+  // plane 2: z >= minZ
+  ringClipPlanes[2].constant = -minZ; // distance = z - minZ
+
+  // plane 3: z <= maxZ
+  ringClipPlanes[3].constant = maxZ; // distance = -z + maxZ
+}
 
 function createRangeRing(
   radius,
@@ -245,42 +467,43 @@ function createRangeRing(
     color,
     transparent: true,
     opacity,
+    clippingPlanes: ringClipPlanes, // only draw inside ground square
   });
 
   return new THREE.LineLoop(geometry, material);
 }
 
-function addRangeRingWithLabel(
-  scene,
-  radiusMeters,
-  { segments = 128, color = 0x339966, opacity = 0.55 } = {}
-) {
-  const ring = createRangeRing(radiusMeters, segments, color, opacity);
-  ring.position.y = 2;
-  scene.add(ring);
+// function addRangeRingWithLabel(
+//   scene,
+//   radiusMeters,
+//   { segments = 128, color = 0x339966, opacity = 0.55 } = {}
+// ) {
+//   const ring = createRangeRing(radiusMeters, segments, color, opacity);
+//   ring.position.y = 2;
+//   scene.add(ring);
 
-  const km = Math.round(radiusMeters / 1000);
-  const labelText = `${km} km`;
+//   const km = Math.round(radiusMeters / 1000);
+//   const labelText = `${km} km`;
 
-  const LABEL_HEIGHT = 4000;
-  const LABEL_OFFSET = 5000;
+//   const LABEL_HEIGHT = 4000;
+//   const LABEL_OFFSET = 5000;
 
-  const makeLabelSprite = (xSign) => {
-    const sprite = createTextSprite(labelText, {
-      fontSize: 150,
-      padding: 0,
-    });
+//   const makeLabelSprite = (xSign) => {
+//     const sprite = createTextSprite(labelText, {
+//       fontSize: 150,
+//       padding: 0,
+//     });
 
-    const x = xSign * (radiusMeters + LABEL_OFFSET);
-    sprite.position.set(x, LABEL_HEIGHT, 0);
+//     const x = xSign * (radiusMeters + LABEL_OFFSET);
+//     sprite.position.set(x, LABEL_HEIGHT, 0);
 
-    scene.add(sprite);
-    rangeLabelSprites.push(sprite);
-  };
+//     scene.add(sprite);
+//     registerLabelSprite(sprite, { sizeMultiplier: 1 });
+//   };
 
-  makeLabelSprite(+1);
-  makeLabelSprite(-1);
-}
+//   makeLabelSprite(+1);
+//   makeLabelSprite(-1);
+// }
 
 // function createAltitudeAxis(maxAlt = 12000, step = 2000) {
 //   const group = new THREE.Group();
@@ -318,13 +541,97 @@ function addRangeRingWithLabel(
 //   return group;
 // }
 
-function createAltitudeAxis(maxAlt = 12000, step = 2000) {
+function addRangeRingWithLabel(
+  scene,
+  radiusMeters,
+  { segments = 128, color = 0x339966, opacity = 0.55 } = {}
+) {
+  const ring = createRangeRing(radiusMeters, segments, color, opacity);
+  ring.position.y = 2;
+  scene.add(ring);
+
+  const km = Math.round(radiusMeters / 1000);
+  const labelText = `${km} km`;
+
+  const LABEL_HEIGHT = 4000; // keep as before
+  const LABEL_OFFSET = 5000; // reuse later in positioning
+
+  // --- FRONT label: always created ---
+  const frontSprite = createTextSprite(labelText, {
+    fontSize: 150,
+    padding: 0,
+  });
+  scene.add(frontSprite);
+  registerLabelSprite(frontSprite, { sizeMultiplier: 1 });
+
+  rangeRingLabels.push({
+    sprite: frontSprite,
+    radiusMeters,
+    side: "front",
+    labelHeight: LABEL_HEIGHT,
+    labelOffset: LABEL_OFFSET,
+  });
+
+  // --- BACK label: only for 50 km ring ---
+  if (radiusMeters === 50_000) {
+    const backSprite = createTextSprite(labelText, {
+      fontSize: 150,
+      padding: 0,
+    });
+    scene.add(backSprite);
+    registerLabelSprite(backSprite, { sizeMultiplier: 1 });
+
+    rangeRingLabels.push({
+      sprite: backSprite,
+      radiusMeters,
+      side: "back",
+      labelHeight: LABEL_HEIGHT,
+      labelOffset: LABEL_OFFSET,
+    });
+  }
+}
+
+function updateRangeRingLabelPositions() {
+  if (!coverageDir) return;
+
+  // horizontal projection of coverageDir
+  const dirProj = new THREE.Vector3(coverageDir.x, 0, coverageDir.z);
+  if (dirProj.lengthSq() < 1e-6) {
+    dirProj.set(1, 0, 0); // fallback
+  } else {
+    dirProj.normalize();
+  }
+
+  const frontDir = dirProj;
+  const backDir = dirProj.clone().multiplyScalar(-1);
+
+  for (const entry of rangeRingLabels) {
+    const { sprite, radiusMeters, side, labelHeight, labelOffset } = entry;
+
+    const r = radiusMeters + (labelOffset ?? 0);
+    const dir = side === "front" ? frontDir : backDir;
+    const pos2D = dir.clone().multiplyScalar(r);
+
+    sprite.position.set(pos2D.x, labelHeight, pos2D.z);
+
+    // visibility rules:
+    // - all FRONT labels visible
+    // - BACK: only for 50km (we already only create that one, but keep the rule explicit)
+    if (side === "back" && radiusMeters !== 50_000) {
+      sprite.visible = false;
+    } else {
+      sprite.visible = true;
+    }
+  }
+}
+
+function createAltitudeAxis(maxAlt = 12000, step = 2000, altScale = 1) {
   const group = new THREE.Group();
 
   const mainMat = new THREE.LineBasicMaterial({ color: 0x66aaff });
   const mainPoints = [
     new THREE.Vector3(0, 0, 0),
-    new THREE.Vector3(0, maxAlt, 0),
+    new THREE.Vector3(0, maxAlt * altScale, 0),
   ]; // Y is up
   const mainGeom = new THREE.BufferGeometry().setFromPoints(mainPoints);
   const mainLine = new THREE.Line(mainGeom, mainMat);
@@ -334,9 +641,10 @@ function createAltitudeAxis(maxAlt = 12000, step = 2000) {
   const tickHalfLength = 2000;
 
   for (let alt = step; alt <= maxAlt; alt += step) {
+    const y = alt * altScale;
     const tickPoints = [
-      new THREE.Vector3(-tickHalfLength, alt, 0),
-      new THREE.Vector3(+tickHalfLength, alt, 0),
+      new THREE.Vector3(-tickHalfLength, y, 0),
+      new THREE.Vector3(+tickHalfLength, y, 0),
     ];
     const tickGeom = new THREE.BufferGeometry().setFromPoints(tickPoints);
     const tickLine = new THREE.Line(tickGeom, tickMat);
@@ -344,22 +652,23 @@ function createAltitudeAxis(maxAlt = 12000, step = 2000) {
 
     const labelText = `${alt.toLocaleString()} m`;
     const sprite = createTextSprite(labelText, {
-      fontSize: 48,
+      fontSize: 100,
       padding: 6,
     });
-    sprite.position.set(tickHalfLength + 2500, alt, 0);
+    sprite.position.set(tickHalfLength + 2500, y, 0);
 
-    // 🔹 give it a visible world size
-    const aspect = sprite.userData.aspect || 2;
-    const worldHeight = 6000; // 6 km tall, tweak to taste
-    const worldWidth = worldHeight * aspect;
-    sprite.scale.set(worldWidth, worldHeight, 1);
+    // // 🔹 give it a visible world size
+    // const aspect = sprite.userData.aspect || 2;
+    // const worldHeight = 6000; // 6 km tall, tweak to taste
+    // const worldWidth = worldHeight * aspect;
+    // sprite.scale.set(worldWidth, worldHeight, 1);
 
     // optional: always visible over lines
     sprite.material.depthTest = false;
     sprite.material.depthWrite = false;
 
     group.add(sprite);
+    registerLabelSprite(sprite, { sizeMultiplier: 0.8 });
   }
 
   return group;
@@ -388,21 +697,53 @@ function createCompassLabels(radius) {
   return group;
 }
 
-function updateRangeLabelScales() {
+// function updateRangeLabelScales() {
+//   if (!camera) return;
+
+//   const baseScreenFactor = 0.05;
+//   const minScale = 4000;
+//   const maxScale = 40000;
+
+//   for (const sprite of rangeLabelSprites) {
+//     if (!sprite) continue;
+
+//     const dist = camera.position.distanceTo(sprite.position);
+
+//     let worldHeight = dist * baseScreenFactor;
+//     if (worldHeight < minScale) worldHeight = minScale;
+//     if (worldHeight > maxScale) worldHeight = maxScale;
+
+//     const aspect = sprite.userData.aspect || 2;
+//     const worldWidth = worldHeight * aspect;
+
+//     sprite.scale.set(worldWidth, worldHeight, 1);
+//   }
+// }
+
+// ---------------------------------------------------------------------
+// Coverage cone orientation (azimuth + elevation)
+// ---------------------------------------------------------------------
+
+function updateLabelSpriteScales() {
   if (!camera) return;
 
-  const baseScreenFactor = 0.05;
-  const minScale = 4000;
-  const maxScale = 40000;
+  const baseScreenFactor = 0.05; // how big labels look vs distance
+  const minBaseHeight = 4000;
+  const maxBaseHeight = 40000;
 
-  for (const sprite of rangeLabelSprites) {
+  for (const sprite of labelSprites) {
     if (!sprite) continue;
 
     const dist = camera.position.distanceTo(sprite.position);
+    const mult = sprite.userData.labelSizeMultiplier ?? 1;
 
-    let worldHeight = dist * baseScreenFactor;
-    if (worldHeight < minScale) worldHeight = minScale;
-    if (worldHeight > maxScale) worldHeight = maxScale;
+    let worldHeight = dist * baseScreenFactor * mult;
+
+    const minHeight = minBaseHeight * mult;
+    const maxHeight = maxBaseHeight * mult;
+
+    if (worldHeight < minHeight) worldHeight = minHeight;
+    if (worldHeight > maxHeight) worldHeight = maxHeight;
 
     const aspect = sprite.userData.aspect || 2;
     const worldWidth = worldHeight * aspect;
@@ -411,12 +752,26 @@ function updateRangeLabelScales() {
   }
 }
 
-// ---------------------------------------------------------------------
-// Coverage cone orientation (azimuth + elevation)
-// ---------------------------------------------------------------------
-
 const groundClipPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0); // y >= 0
 const baseDir = new THREE.Vector3(1, 0, 0); // +X is "default" cone axis
+
+// function setCoverageOrientation(coneMesh, wireMesh, azDeg, elDeg) {
+//   const az = THREE.MathUtils.degToRad(azDeg);
+//   const el = THREE.MathUtils.degToRad(elDeg);
+
+//   const cosEl = Math.cos(el);
+//   const dir = new THREE.Vector3(
+//     cosEl * Math.sin(az), // X (east)
+//     Math.sin(el), // Y (up)
+//     cosEl * Math.cos(az) // Z (north); 0°=north, 90°=east
+//   ).normalize();
+
+//   coverageDir.copy(dir);
+
+//   const quat = new THREE.Quaternion().setFromUnitVectors(baseDir, dir);
+//   coneMesh.quaternion.copy(quat);
+//   if (wireMesh) wireMesh.quaternion.copy(quat);
+// }
 
 function setCoverageOrientation(coneMesh, wireMesh, azDeg, elDeg) {
   const az = THREE.MathUtils.degToRad(azDeg);
@@ -429,9 +784,112 @@ function setCoverageOrientation(coneMesh, wireMesh, azDeg, elDeg) {
     cosEl * Math.cos(az) // Z (north); 0°=north, 90°=east
   ).normalize();
 
+  coverageDir.copy(dir);
+
   const quat = new THREE.Quaternion().setFromUnitVectors(baseDir, dir);
   coneMesh.quaternion.copy(quat);
   if (wireMesh) wireMesh.quaternion.copy(quat);
+
+  // 🔹 keep ground/grid aligned with the coverage direction
+  updateGroundAndGridPlacement();
+
+  // 🔹 labels follow coverage direction as well
+  updateRangeRingLabelPositions();
+}
+
+function enterFixedPointView() {
+  if (!camera || !controls) return;
+
+  // save current camera + controls
+  savedView.position.copy(camera.position);
+  savedView.target.copy(controls.target);
+  savedView.controls.enableRotate = controls.enableRotate;
+  savedView.controls.enablePan = controls.enablePan;
+  savedView.controls.enableZoom = controls.enableZoom;
+  savedView.controls.minDistance = controls.minDistance;
+  savedView.controls.maxDistance = controls.maxDistance;
+
+  // --- choose distances relative to origin ---
+
+  const eyeHeight = 1500; // meters above ground
+  const frontDistance = 80_000; // point inside the cone (80 km "forward")
+  const backDistance = 5_000; // camera 5 km "behind" the origin
+
+  // coverageDir is the axis of the cone (unit vector). Normalize just in case
+  const dir = coverageDir.clone().normalize();
+
+  // target is IN FRONT of origin, inside the cone
+  const target = dir.clone().multiplyScalar(frontDistance);
+
+  // eye is BEHIND origin, along -dir, plus height
+  const eye = dir.clone().multiplyScalar(-backDistance);
+  eye.y = eyeHeight;
+
+  camera.position.copy(eye);
+  controls.target.copy(target);
+  camera.lookAt(controls.target);
+
+  // ---- IMPORTANT: don't let OrbitControls clamp our distance away ----
+
+  const distance = camera.position.distanceTo(controls.target);
+
+  // allow at least this distance
+  controls.minDistance = Math.min(1000, distance * 0.5);
+  controls.maxDistance = distance * 2; // > current distance, so no clamping
+
+  // you can decide how "locked" this view is:
+  controls.enableRotate = true; // enable to look around a bit
+  controls.enablePan = false;
+  controls.enableZoom = true;
+
+  controls.update();
+
+  isFixedPointView = true;
+}
+
+function exitFixedPointView() {
+  if (!camera || !controls) return;
+
+  // restore previous camera + controls
+  camera.position.copy(savedView.position);
+  controls.target.copy(savedView.target);
+  camera.lookAt(controls.target);
+
+  controls.enableRotate = savedView.controls.enableRotate;
+  controls.enablePan = savedView.controls.enablePan;
+  controls.enableZoom = savedView.controls.enableZoom;
+  controls.minDistance = savedView.controls.minDistance;
+  controls.maxDistance = savedView.controls.maxDistance;
+
+  controls.update();
+
+  isFixedPointView = false;
+}
+
+function toggleFixedPointView() {
+  if (isFixedPointView) {
+    exitFixedPointView();
+  } else {
+    enterFixedPointView();
+  }
+}
+
+function onCanvasPointerDown(event) {
+  if (!renderer || !camera || !originSphere) return;
+
+  const rect = renderer.domElement.getBoundingClientRect();
+
+  // convert to NDC
+  pointerNDC.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+  pointerNDC.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+  raycaster.setFromCamera(pointerNDC, camera);
+
+  const intersects = raycaster.intersectObject(originSphere, true);
+
+  if (intersects.length > 0) {
+    toggleFixedPointView();
+  }
 }
 
 // ---------------------------------------------------------------------
@@ -456,6 +914,8 @@ function initScene() {
   renderer.setClearColor(0x02030a, 1);
   renderer.localClippingEnabled = true;
 
+  renderer.domElement.addEventListener("pointerdown", onCanvasPointerDown);
+
   // Scene
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x02030a);
@@ -463,11 +923,11 @@ function initScene() {
   // Camera
   camera = new THREE.PerspectiveCamera(60, width / height, 50, 1_000_000);
   camera.position.set(120000, 80000, -200000);
-  camera.lookAt(0, 4000, 0);
+  camera.lookAt(0, 4000 * ALT_SCALE, 0);
 
   // Controls
   controls = new OrbitControls(camera, renderer.domElement);
-  controls.target.set(0, 4000, 0);
+  controls.target.set(0, 4000 * ALT_SCALE, 0);
   controls.enablePan = true;
   controls.minDistance = 8000;
   controls.maxDistance = 500000;
@@ -477,20 +937,35 @@ function initScene() {
   controls.dampingFactor = 0.5;
 
   // === Viewport gizmo (top-left) ===
+  const containerEl = canvas.parentElement;
   gizmo = new ViewportGizmo(camera, renderer, {
-    type: "sphere", // or "sphere" / "rounded-cube"
-    size: 140, // pixels – make it bigger if you want
-    placement: "bottom-left", // pin to top-left
+    container: containerEl,
+    type: "sphere",
+    size: 140,
+    placement: "top-right",
     offset: {
       left: 25,
       top: 25,
     },
-    // map axes to your semantics: X = East, Y = Up, Z = North
     x: { label: "E", color: 0xff5555, labelColor: "#ffffff", scale: 0.8 },
     y: { label: "UP", color: 0x55ff55, labelColor: "#ffffff", scale: 0.8 },
-    z: { label: "N", color: 0x5555ff, labelColor: "#ffffff", scale: 0.8 },
+    z: {
+      enabled: true,
+      line: false,
+      label: "",
+      color: 0x5555ff,
+      labelColor: "transparent",
+      scale: 0.5,
+    },
+    nz: {
+      enabled: true,
+      label: "N",
+      line: true,
+      color: 0x5555ff,
+      labelColor: "#ffffff",
+      scale: 0.8,
+    },
   });
-
   gizmo.attachControls(controls);
 
   // Lights
@@ -499,28 +974,50 @@ function initScene() {
   scene.add(dirLight);
   scene.add(new THREE.AmbientLight(0xffffff, 0.35));
 
+  // // Ground
+  // const groundGeom = new THREE.PlaneGeometry(GROUND_SIZE, GROUND_SIZE);
+  // const groundMat = new THREE.MeshPhongMaterial({
+  //   color: 0x050814,
+  //   side: THREE.FrontSide,
+  // });
+  // const ground = new THREE.Mesh(groundGeom, groundMat);
+  // ground.rotation.x = -Math.PI / 2;
+  // ground.position.set(150000, 0, 0); // 50km behind, rest in front
+  // scene.add(ground);
+
+  // // Grid
+  // const gridSize = GROUND_SIZE;
+  // const gridDivisions = 60;
+  // const grid = new THREE.GridHelper(
+  //   gridSize,
+  //   gridDivisions,
+  //   0x00ffff, // center liens
+  //   0xc4c4c5 // regular lines
+  // );
+  // grid.position.set(150000, 1, 0);
+  // grid.material.opacity = 0.35;
+  // grid.material.transparent = true;
+  // scene.add(grid);
+
   // Ground
-  const GROUND_SIZE = 400000; // 400 km
   const groundGeom = new THREE.PlaneGeometry(GROUND_SIZE, GROUND_SIZE);
   const groundMat = new THREE.MeshPhongMaterial({
     color: 0x050814,
     side: THREE.FrontSide,
   });
-  const ground = new THREE.Mesh(groundGeom, groundMat);
+  ground = new THREE.Mesh(groundGeom, groundMat);
   ground.rotation.x = -Math.PI / 2;
-  ground.position.set(150000, 0, 0); // 50km behind, rest in front
   scene.add(ground);
 
   // Grid
-  const gridSize = GROUND_SIZE;
   const gridDivisions = 60;
-  const grid = new THREE.GridHelper(
-    gridSize,
+  grid = new THREE.GridHelper(
+    GROUND_SIZE,
     gridDivisions,
-    0x00ffff, // center liens
+    0x00ffff, // center lines
     0xc4c4c5 // regular lines
   );
-  grid.position.set(150000, 1, 0);
+  grid.position.y = 1;
   grid.material.opacity = 0.35;
   grid.material.transparent = true;
   scene.add(grid);
@@ -538,12 +1035,12 @@ function initScene() {
   const compass = createCompassLabels(ringRadii[ringRadii.length - 1] + 8000);
   scene.add(compass);
 
-  const altitudeAxis = createAltitudeAxis(12000, 2000);
+  const altitudeAxis = createAltitudeAxis(12000, 2000, ALT_SCALE);
   scene.add(altitudeAxis);
 
-  const originSphereGeom = new THREE.SphereGeometry(600, 24, 24);
+  const originSphereGeom = new THREE.SphereGeometry(1500, 24, 24);
   const originSphereMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
-  const originSphere = new THREE.Mesh(originSphereGeom, originSphereMat);
+  originSphere = new THREE.Mesh(originSphereGeom, originSphereMat);
   originSphere.position.set(0, 0, 0);
   scene.add(originSphere);
 
@@ -555,23 +1052,22 @@ function initScene() {
     roughness: 0.6,
   });
   const debugBox = new THREE.Mesh(debugBoxGeom, debugBoxMat);
-  debugBox.position.set(80_000, 2_000, 0); // X=80km, Y=2000m, Z=0
+  debugBox.position.set(80_000, 2_000 * ALT_SCALE, 10_000);
   scene.add(debugBox);
 
   // Coverage cone geometry (apex at origin, axis along +X by default)
-  const coverageHeight = 300000;
   const halfAngleRad = Math.PI / 4;
-  const coverageRadius = coverageHeight * Math.tan(halfAngleRad);
+  const coverageRadius = COVERAGE_HEIGHT * Math.tan(halfAngleRad);
 
   const coverageBaseGeom = new THREE.ConeGeometry(
     coverageRadius,
-    coverageHeight,
+    COVERAGE_HEIGHT,
     48,
     1,
     true
   );
   // Move apex from +H/2 down to 0
-  coverageBaseGeom.translate(0, -coverageHeight / 2, 0);
+  coverageBaseGeom.translate(0, -COVERAGE_HEIGHT / 2, 0);
   // Rotate axis from +Y to +X (our baseDir)
   coverageBaseGeom.rotateZ(Math.PI / 2);
 
@@ -613,7 +1109,7 @@ function initScene() {
     if (!renderer || !scene || !camera) return;
 
     controls && controls.update();
-    updateRangeLabelScales();
+    updateLabelSpriteScales();
 
     renderer.setScissorTest(false);
     // main scene render
@@ -686,6 +1182,7 @@ onBeforeUnmount(() => {
   }
 
   if (renderer) {
+    renderer.domElement.removeEventListener("pointerdown", onCanvasPointerDown);
     renderer.dispose();
     renderer = null;
   }
@@ -703,6 +1200,7 @@ onBeforeUnmount(() => {
   background: #02030a;
   color: #c4c4c5;
   display: flex;
+  position: relative;
 }
 
 canvas {
