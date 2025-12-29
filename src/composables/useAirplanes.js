@@ -59,7 +59,7 @@ export function usePlanes({
     const zNorth = R * dPhi; // meters north
     const yUp = (alt ?? 0) * altScale;
 
-    return new THREE.Vector3(xEast, yUp, zNorth);
+    return new THREE.Vector3(xEast, yUp, -zNorth);
   }
 
   function formatLat(lat) {

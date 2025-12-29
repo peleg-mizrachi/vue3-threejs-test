@@ -32,13 +32,16 @@
 
       <section class="test-window">
         <h2>3D Profile View</h2>
-        <div class="three-wrapper">
+        <div v-if="isFirst" class="three-wrapper">
           <!-- <ThreeProfileView2 :origin="profileOrigin" :planes="planes" /> -->
           <ThreeProfileView3
             :origin="profileOrigin"
             :planes="planes"
             :coverageAzimuthDeg="coverageAzimuthDeg"
           />
+        </div>
+        <div v-else class="three-wrapper">
+          <ThreeTests />
         </div>
       </section>
     </main>
@@ -51,6 +54,11 @@ import LeafletMap from "./components/LeafletMap.vue";
 import ThreeProfileView from "./components/ThreeProfileView.vue";
 import ThreeProfileView2 from "./components/ThreeProfileView2.vue";
 import ThreeProfileView3 from "./components/ThreeProfileView3.vue";
+import ThreeTests from "./components/ThreeTests.vue";
+import { devtools } from "@vue/devtools";
+
+if (process.env.NODE_ENV === "development")
+  devtools.connect(/* host (the default is "http://localhost"), port (the default is 8090) */);
 
 // Tel Aviv-ish mock planes with heading (deg) and speed (m/s)
 const planes = ref([
@@ -59,11 +67,13 @@ const planes = ref([
   { id: "LY303", lat: 32.15, lng: 34.75, alt: 7000, heading: 320, speed: 210 },
 ]);
 
+const isFirst = ref(true);
+
 // const profileOrigin = ref(null);
 const profileOrigin = ref({ lat: 31.7, lng: 36.815 });
 let moveTimer = null;
 
-const coverageAzimuthDeg = ref(270);
+const coverageAzimuthDeg = ref(0);
 function onRightClickOrigin(latlng) {
   profileOrigin.value = latlng;
 }

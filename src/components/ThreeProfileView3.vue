@@ -17,6 +17,8 @@ import { useGizmo } from "@/composables/useGizmo.js";
 import { useLabels } from "@/composables/useLabels.js";
 import { useFixedView } from "@/composables/useFixedView.js";
 import { usePlanes } from "@/composables/useAirplanes.js";
+import { useTerrain } from "@/composables/useTerrain.js";
+import { makeMockHeightField } from "@/utils/mockHeightField.js";
 
 // ---------------------------------------------------------------------
 // Props
@@ -64,6 +66,7 @@ let gizmoApi = null;
 let labelsApi = null;
 let fixedViewApi = null;
 let planesApi = null;
+let terrainApi = null;
 
 // ---------------------------------------------------------------------
 // Coordinate + plane helpers
@@ -126,6 +129,58 @@ function initScene() {
   scene.add(dirLight);
   scene.add(new THREE.AmbientLight(0xffffff, 0.35));
 
+  // // --- Terrain (mock heightfield) ---
+  // terrainApi = useTerrain({
+  //   scene,
+  //   sizeMeters: 300_000, // 300km square
+  //   samples: 257, // ~1.17km between samples (300km / 256)
+  //   altScale: ALT_SCALE, // match planes exaggeration
+  //   yOffset: 0,
+  //   wireframe: false,
+  // });
+
+  // terrainApi.initTerrain();
+
+  // const heights = makeMockHeightField({
+  //   sizeMeters: 300_000,
+  //   samples: 257,
+  //   seed: 42,
+  //   baseMeters: 0,
+  //   hillsMeters: 800,
+  //   ridgeMeters: 600,
+  //   seaLevelMeters: 0,
+  // });
+
+  // terrainApi.setHeights(heights);
+
+  // X axis (east)
+  scene.add(
+    new THREE.ArrowHelper(
+      new THREE.Vector3(1, 0, 0),
+      new THREE.Vector3(0, 0, 0),
+      150_000,
+      0xff0000
+    )
+  );
+  // Y axis (up)
+  scene.add(
+    new THREE.ArrowHelper(
+      new THREE.Vector3(0, 1, 0),
+      new THREE.Vector3(0, 0, 0),
+      80_000,
+      0x00ff00
+    )
+  );
+  // Z axis (north = -Z)
+  scene.add(
+    new THREE.ArrowHelper(
+      new THREE.Vector3(0, 0, 1),
+      new THREE.Vector3(0, 0, 0),
+      150_000,
+      0x0000ff
+    )
+  );
+
   // --- Ground + grid via composable ---
   groundApi = useGround({
     scene,
@@ -177,13 +232,13 @@ function initScene() {
     roughness: 0.6,
   });
   const debugBox = new THREE.Mesh(debugBoxGeom, debugBoxMat);
-  debugBox.position.set(80_000, 2_000 * ALT_SCALE, 10_000);
+  debugBox.position.set(80_000, 2_000 * ALT_SCALE, -80_000);
   scene.add(debugBox);
 
   coverageApi = useCoverage({
     scene,
     coverageHeight: COVERAGE_HEIGHT,
-    halfAngleRad: Math.PI / 4,
+    halfAngleRad: THREE.MathUtils.degToRad(120 / 2),
     clippingPlane: groundClipPlane,
   });
   coverageDir = coverageApi.coverageDir;
@@ -192,9 +247,13 @@ function initScene() {
     props.coverageElevationDeg
   );
 
+  console.log("coverageDir after init:", coverageDir.toArray());
+
   // Ground + labels need to be in sync with initial coverageDir
   groundApi.updatePlacement(coverageDir);
   rangeRingsApi.updateLabelPositions(coverageDir);
+
+  console.log("coverageDir after init:", coverageDir.toArray());
 
   // Fixed view composable
   fixedViewApi = useFixedView();

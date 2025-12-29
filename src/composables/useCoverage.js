@@ -28,7 +28,7 @@ export function useCoverage(options) {
   const {
     scene,
     coverageHeight = 300_000,
-    halfAngleRad = Math.PI / 4, // 45°
+    halfAngleRad = MathUtils.degToRad(120 / 2), // 60°
     clippingPlane = null, // e.g. groundClipPlane
   } = options;
 
@@ -36,8 +36,8 @@ export function useCoverage(options) {
     throw new Error("useCoverage: scene is required");
   }
 
-  const coverageDir = new Vector3(1, 0, 0); // default +X
-  const baseDir = new Vector3(1, 0, 0);
+  const coverageDir = new Vector3(0, 0, -1);
+  const baseDir = new Vector3(0, 0, -1);
 
   let coverageCone = null;
   let coverageWire = null;
@@ -56,12 +56,12 @@ export function useCoverage(options) {
     // Move apex from +H/2 down to 0
     coverageBaseGeom.translate(0, -coverageHeight / 2, 0);
     // Rotate axis from +Y to +X (our baseDir)
-    coverageBaseGeom.rotateZ(Math.PI / 2);
+    coverageBaseGeom.rotateX(Math.PI / 2);
 
     const matOpts = {
       color: 0x00ffcc,
       transparent: true,
-      opacity: 0.06,
+      opacity: 0.2,
       depthWrite: false,
       depthTest: true,
       side: DoubleSide,
@@ -99,9 +99,9 @@ export function useCoverage(options) {
     const cosEl = Math.cos(el);
     coverageDir
       .set(
-        cosEl * Math.sin(az), // X (east)
-        Math.sin(el), // Y (up)
-        cosEl * Math.cos(az) // Z (north); 0°=north, 90°=east
+        cosEl * Math.sin(az), // +X = east
+        Math.sin(el), // +Y = up
+        -cosEl * Math.cos(az) // az=0 => -Z (north), az=90 => +X (east)
       )
       .normalize();
 
