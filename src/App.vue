@@ -57,8 +57,8 @@ import ThreeProfileView3 from "./components/ThreeProfileView3.vue";
 import ThreeTests from "./components/ThreeTests.vue";
 import { devtools } from "@vue/devtools";
 
-if (process.env.NODE_ENV === "development")
-  devtools.connect(/* host (the default is "http://localhost"), port (the default is 8090) */);
+// if (process.env.NODE_ENV === "development")
+//   devtools.connect(/* host (the default is "http://localhost"), port (the default is 8090) */);
 
 // Tel Aviv-ish mock planes with heading (deg) and speed (m/s)
 const planes = ref([
@@ -70,7 +70,8 @@ const planes = ref([
 const isFirst = ref(true);
 
 // const profileOrigin = ref(null);
-const profileOrigin = ref({ lat: 31.7, lng: 36.815 });
+// const profileOrigin = ref({ lat: 31.7, lng: 36.815 });
+const profileOrigin = ref({ lat: 32.008056, lng: 34.883333 });
 let moveTimer = null;
 
 const coverageAzimuthDeg = ref(0);

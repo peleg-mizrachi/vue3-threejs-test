@@ -74,7 +74,116 @@ let terrainApi = null;
 
 const ALT_SCALE = 10;
 
-function initScene() {
+async function setupTerrain() {
+  terrainApi = useTerrain({
+    scene,
+    sizeMeters: 400_000, // MUST match the generator config
+    samples: 257,
+    altScale: ALT_SCALE,
+    yOffsetMeters: 0,
+    wireframe: false,
+    nodata: -32768,
+    nodataFillMeters: 0,
+  });
+
+  terrainApi.initTerrain();
+
+  const heights = await terrainApi.loadHeightsFromUrl("/terrain.bin");
+  console.log(heights);
+
+  debugHeightStats(heights, 257, -32768);
+  debugWestEastNodata(heights, 257, -32768);
+  debugEdgeNodata(heights, 257, -32768);
+
+  terrainApi.setHeights(heights);
+  // terrainApi.setDebugNodataColors(heights);
+  // paint by height + water for nodata
+  terrainApi.setColorsFromHeights(heights, {
+    nodataValue: -32768,
+    seaLevel: 0,
+    // tweak these later if you want
+    h1: 200,
+    h2: 800,
+    h3: 1800,
+    h4: 3000,
+  });
+  // terrainApi.setHeights(heights, { flipX: true });
+
+  // scene.add(new THREE.AmbientLight(0xffffff, 0.85));
+  // Optional: align terrain with your ground offset
+  // If you want it to sit exactly where the ground plane is:
+  const ground = groundApi.getGround();
+  terrainApi.setPlacement({ x: ground.position.x, z: ground.position.z });
+
+  return true;
+}
+
+function debugHeightStats(heights, N, NODATA) {
+  let min = Infinity,
+    max = -Infinity,
+    nodata = 0;
+  for (let i = 0; i < heights.length; i++) {
+    const h = heights[i];
+    if (h === NODATA) {
+      nodata++;
+      continue;
+    }
+    if (h < min) min = h;
+    if (h > max) max = h;
+  }
+  console.log("HEIGHT STATS", {
+    min: Number.isFinite(min) ? min : null,
+    max: Number.isFinite(max) ? max : null,
+    nodata,
+    total: heights.length,
+    nodataPct: ((100 * nodata) / heights.length).toFixed(1) + "%",
+  });
+}
+
+function debugWestEastNodata(heights, N, NODATA) {
+  let westNo = 0,
+    westTotal = 0;
+  let eastNo = 0,
+    eastTotal = 0;
+
+  for (let row = 0; row < N; row++) {
+    for (let col = 0; col < N; col++) {
+      const h = heights[row * N + col];
+      if (col < N / 2) {
+        westTotal++;
+        if (h === NODATA) westNo++;
+      } else {
+        eastTotal++;
+        if (h === NODATA) eastNo++;
+      }
+    }
+  }
+
+  console.log("WEST/EAST NODATA", {
+    westNo,
+    westPct: ((100 * westNo) / westTotal).toFixed(1) + "%",
+    eastNo,
+    eastPct: ((100 * eastNo) / eastTotal).toFixed(1) + "%",
+  });
+}
+
+function debugEdgeNodata(heights, N, NODATA) {
+  let top = 0,
+    bottom = 0,
+    left = 0,
+    right = 0;
+
+  for (let i = 0; i < N; i++) {
+    if (heights[i] === NODATA) top++;
+    if (heights[(N - 1) * N + i] === NODATA) bottom++;
+    if (heights[i * N] === NODATA) left++;
+    if (heights[i * N + (N - 1)] === NODATA) right++;
+  }
+
+  console.log("EDGE NODATA", { top, bottom, left, right });
+}
+
+async function initScene() {
   const canvas = canvasEl.value;
   if (!canvas) return;
 
@@ -128,30 +237,6 @@ function initScene() {
   dirLight.position.set(30000, 60000, -40000);
   scene.add(dirLight);
   scene.add(new THREE.AmbientLight(0xffffff, 0.35));
-
-  // // --- Terrain (mock heightfield) ---
-  // terrainApi = useTerrain({
-  //   scene,
-  //   sizeMeters: 300_000, // 300km square
-  //   samples: 257, // ~1.17km between samples (300km / 256)
-  //   altScale: ALT_SCALE, // match planes exaggeration
-  //   yOffset: 0,
-  //   wireframe: false,
-  // });
-
-  // terrainApi.initTerrain();
-
-  // const heights = makeMockHeightField({
-  //   sizeMeters: 300_000,
-  //   samples: 257,
-  //   seed: 42,
-  //   baseMeters: 0,
-  //   hillsMeters: 800,
-  //   ridgeMeters: 600,
-  //   seaLevelMeters: 0,
-  // });
-
-  // terrainApi.setHeights(heights);
 
   // X axis (east)
   scene.add(
@@ -275,6 +360,8 @@ function initScene() {
     0
   );
 
+  const isInit = await setupTerrain();
+
   planesApi = usePlanes({
     scene,
     camera,
@@ -359,6 +446,9 @@ watch(
     // keep ground and labels aligned with the new coverageDir
     groundApi.updatePlacement(coverageDir);
     rangeRingsApi.updateLabelPositions(coverageDir);
+
+    const g = groundApi.getGround();
+    terrainApi?.setPlacement({ x: g.position.x, z: g.position.z });
   }
 );
 

@@ -1,0 +1,23 @@
+{
+  "origin": {
+    "lat": 49.397,
+    "lon": 14.6
+  },
+  "grid": {
+    "size_m": 400000.0,
+    "samples": 257
+  },
+  "center_offset": {
+    "east_m": 0.0,
+    "north_m": 150000.0
+  },
+  "format": {
+    "dtype": "int16",
+    "endian": "little",
+    "layout": "row-major"
+  },
+  "nodata_out": -32768,
+  "dataset_nodata": -32767.0,
+  "min": -30,
+  "max": 1521
+}

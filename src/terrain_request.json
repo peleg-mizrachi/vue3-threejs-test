@@ -1,0 +1,10 @@
+{
+  "origin": { "lat": 32.0, "lon": 34.893 },
+  "grid": { "size_m": 400000, "samples": 257 },
+  "center_offset": { "east_m": 0, "north_m": 150000 },
+  "output": { "dtype": "int16", "endian": "little", "layout": "row-major" },
+
+  "raster_path": "F:/Projects/vue-leaflet-3d-demo/src/dted.vrt",
+  "out_bin": "../public/terrain.bin",
+  "out_meta": "../public/terrain.meta.json"
+}

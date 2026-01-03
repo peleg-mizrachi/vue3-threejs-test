@@ -1,0 +1,23 @@
+{
+  "origin": {
+    "lat": 32.0,
+    "lon": 34.893
+  },
+  "grid": {
+    "size_m": 400000.0,
+    "samples": 257
+  },
+  "center_offset": {
+    "east_m": 0.0,
+    "north_m": 150000.0
+  },
+  "format": {
+    "dtype": "int16",
+    "endian": "little",
+    "layout": "row-major"
+  },
+  "nodata_out": -32768,
+  "min": -405,
+  "max": 3053,
+  "out_bin": "F:\\Projects\\vue-leaflet-3d-demo\\public\\terrain.bin"
+}

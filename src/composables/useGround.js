@@ -60,6 +60,7 @@ export function useGround({ scene, size = 400_000, backMargin = 50_000 }) {
     grid.position.y = 1;
     grid.material.opacity = 0.35;
     grid.material.transparent = true;
+    grid.visible = false;
     scene.add(grid);
   }
 
